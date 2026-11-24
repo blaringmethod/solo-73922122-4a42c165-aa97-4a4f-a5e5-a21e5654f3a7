@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>联答人数查询 — 状态：
+    <span class="badge s-{{ status }}">
+      {% if status == 'IMPORTED' %}已导入·待核对
+      {% elif status == 'VERIFIED' %}已核对·待发布
+      {% elif status == 'SUPPLYING' %}供数中
+      {% elif status == 'PAUSED' %}已暂停·待重新核对{% endif %}
+    </span>
+  </h2>
+  <p class="muted">
+    缺码卡卷型尚未查实时，枚举<b>所有能复现整表人数与实收甲卷份数的卷型分配</b>，
+    统计两道题各自指定标准选项被同一张卡同时选中的人数（联答人数），列出全部确实可达的取值。
+    已识别卷型照用；存在无法换算的作答或同卡同题重复的分配一律排除。仅在<b>供数中</b>开放。
+  </p>
+
+  {% if error %}
+  <div class="flash error">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('joint_query') }}">
+    <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-end;">
+      <div>
+        <h3>题目一（题号 + 标准选项）</h3>
+        <select name="q1" required style="min-width:230px;">
+          <option value="">请选择题号/标准选项</option>
+          {% for qid in qids %}
+          <optgroup label="{{ qid }}">
+            {% for so in options_by_qid[qid] %}
+            <option value="{{ qid }}|{{ so }}" {{ 'selected' if form.q1 == qid ~ '|' ~ so }}>
+              {{ qid }} — 选项 {{ so }}
+            </option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <h3>题目二（题号 + 标准选项，须与题目一不同题）</h3>
+        <select name="q2" required style="min-width:230px;">
+          <option value="">请选择题号/标准选项</option>
+          {% for qid in qids %}
+          <optgroup label="{{ qid }}">
+            {% for so in options_by_qid[qid] %}
+            <option value="{{ qid }}|{{ so }}" {{ 'selected' if form.q2 == qid ~ '|' ~ so }}>
+              {{ qid }} — 选项 {{ so }}
+            </option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <button type="submit" class="green" {{ '' if status == 'SUPPLYING' else 'disabled' }}>
+          查询可达联答人数
+        </button>
+      </div>
+    </div>
+  </form>
+  <p class="muted" style="margin-top:10px">
+    候选项来自待供数表的题号与标准选项。计算期间仍可提交更正并触发停供；
+    出结果前会按最新已提交状态复核，若已停供或计算依据有变（即便供数表人数未变），只提示重查。
+  </p>
+</div>
+
+{% if result %}
+<div class="card">
+  <h2>查询结果：{{ qid1 }} / 选项 {{ option1 }}　×　{{ qid2 }} / 选项 {{ option2 }}</h2>
+
+  {% if not result.ok %}
+  <div class="flash warn">请重新查询：{{ result.recheck_reason }}</div>
+  {% elif not result.feasible %}
+  <div class="flash error">无解：{{ result.reason }}</div>
+  {% elif not result.complete %}
+  <div class="flash warn">
+    搜索未完成：{{ result.reason }}。下列只是已确认可达的取值，不代表完整集合，请缩小数据量或重查。
+  </div>
+  <table>
+    <tr><th>已确认可达的联答人数</th><th>已枚举可行分配数</th><th>搜索节点</th></tr>
+    <tr>
+      <td>{% for v in result.joint_values %}<b style="margin-right:10px">{{ v }}</b>{% else %}<span class="muted">暂未确认到</span>{% endfor %}</td>
+      <td>{{ result.solutions }}</td>
+      <td>{{ result.nodes }}</td>
+    </tr>
+  </table>
+  {% else %}
+  <div class="flash ok">
+    完整枚举完成：共 {{ result.solutions }} 个可行分配，搜索节点 {{ result.nodes }}。
+  </div>
+  <table>
+    <tr><th>确实可达的联答人数（全部取值）</th></tr>
+    <tr>
+      <td>
+        {% for v in result.joint_values %}<b style="display:inline-block;margin:2px 12px 2px 0;font-size:18px">{{ v }} 人</b>{% endfor %}
+      </td>
+    </tr>
+  </table>
+  <p class="muted">
+    例如若只有 0 和 2 可达，本页就只列出这两个值；不存在于列表中的取值在任何可行分配下都不会出现。
+  </p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

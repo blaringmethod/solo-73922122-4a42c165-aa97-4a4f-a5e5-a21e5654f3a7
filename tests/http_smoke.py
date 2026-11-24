@@ -106,5 +106,44 @@ multipart(BASE + "/import/supply", {}, {"supply_file": ("b.csv", (SAMPLES/"suppl
 html = post(BASE + "/check/run")
 check("篡改人数核对不通过", any("不存在" in m or "核对未通过" in m for _, m in flashes(html)))
 
+# 9 联答查询：恢复供数后用 {0,2} 专用样例走完整 HTTP 流程
+multipart(BASE + "/import/supply", {}, {"supply_file": ("s.csv", (SAMPLES/"supply.csv").read_bytes())})
+post(BASE + "/resume")
+check("恢复供数 SUPPLYING", status_badge(get(BASE+"/check")) == "SUPPLYING")
+
+multipart(BASE + "/import/answers", {}, {"answer_file": ("ja.csv", (SAMPLES/"joint_answers.csv").read_bytes())})
+multipart(BASE + "/import/mapping", {}, {"mapping_file": ("jm.csv", (SAMPLES/"joint_mapping.csv").read_bytes())})
+multipart(BASE + "/import/supply", {}, {"supply_file": ("js.csv", (SAMPLES/"joint_supply.csv").read_bytes())})
+post(BASE + "/received", {"received_a": "2"})
+check("联答样例导入后待核对", status_badge(get(BASE+"/check")) == "IMPORTED")
+
+# 未发布前联答被守卫拦截
+html = post(BASE + "/joint/query", {"q1": "Q7|A", "q2": "Q8|A"})
+check("非供数中联答被拦", "仅在供数中" in html)
+
+post(BASE + "/check/run")
+post(BASE + "/publish")
+check("联答样例发布供数", status_badge(get(BASE+"/joint")) == "SUPPLYING")
+
+html = get(BASE + "/joint")
+check("联答页候选含 Q7/A 与 Q8/A", "Q7|A" in html and "Q8|A" in html)
+html = post(BASE + "/joint/query", {"q1": "Q7|A", "q2": "Q8|A"})
+check("联答完整枚举提示", "完整枚举完成" in html, html[:200])
+check("页面只列 0 人和 2 人", ("0 人" in html) and ("2 人" in html) and ("1 人" not in html), html[:200])
+
+# 同题被拒
+html = post(BASE + "/joint/query", {"q1": "Q7|A", "q2": "Q7|Z"})
+check("同题查询被拒", "两道不同的题" in html)
+
+# 无解：把实收份数改成不可能的值并恢复供数流程，先停供验证重查提示
+post(BASE + "/correct/received", {"received_a": "4"})
+check("份数更正触发停供", status_badge(get(BASE+"/joint")) == "PAUSED")
+html = post(BASE + "/joint/query", {"q1": "Q7|A", "q2": "Q8|A"})
+check("停供后联答只提示重查/被拦", "仅在供数中" in html)
+# 恢复
+post(BASE + "/correct/received", {"received_a": "2"})
+post(BASE + "/resume")
+check("恢复后可再查", "完整枚举完成" in post(BASE + "/joint/query", {"q1": "Q7|A", "q2": "Q8|A"}))
+
 print(f"\nHTTP 冒烟结果：通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

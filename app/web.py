@@ -14,6 +14,7 @@ from flask import (
 )
 
 from . import services
+from . import joint as joint_svc
 from .csv_utils import ImportError_
 from .db import (
     META_RECEIVED_A,
@@ -239,6 +240,93 @@ def correct_received():
     except ImportError_ as exc:
         flash(f"更正失败（沿用已提交状态）：{exc}", "error")
     return redirect(request.referrer or url_for("index"))
+
+
+# ---------------------------------------------------------------- 联答查询
+@app.route("/joint")
+def joint_page():
+    """联答查询页：选择两道不同的题及各自标准选项。"""
+    conn = get_conn()
+    status = get_status(conn)
+    # 候选题号/标准选项以供数表为准（能复现整表的单元才有业务意义）
+    cells = conn.execute(
+        "SELECT qid, std_option, cnt FROM supply ORDER BY qid, std_option"
+    ).fetchall()
+    qids = []
+    options_by_qid: dict[str, list[str]] = {}
+    for r in cells:
+        if r["qid"] not in options_by_qid:
+            qids.append(r["qid"])
+            options_by_qid[r["qid"]] = []
+        options_by_qid[r["qid"]].append(r["std_option"])
+    form = {
+        "q1": request.args.get("q1", ""),
+        "q2": request.args.get("q2", ""),
+    }
+    return render_template(
+        "joint.html",
+        status=status,
+        qids=qids,
+        options_by_qid=options_by_qid,
+        form=form,
+        result=None,
+        error=None,
+    )
+
+
+@app.route("/joint/query", methods=["POST"])
+def joint_query():
+    """执行联答查询；计算前后按最新已提交状态复核。"""
+    conn = get_conn()
+    status = get_status(conn)
+    cells = conn.execute(
+        "SELECT qid, std_option, cnt FROM supply ORDER BY qid, std_option"
+    ).fetchall()
+    qids = []
+    options_by_qid: dict[str, list[str]] = {}
+    for r in cells:
+        if r["qid"] not in options_by_qid:
+            qids.append(r["qid"])
+            options_by_qid[r["qid"]] = []
+        options_by_qid[r["qid"]].append(r["std_option"])
+    form = {k: request.form.get(k, "").strip() for k in ("q1", "q2")}
+    sel = {}
+    for key in ("q1", "q2"):
+        parts = form[key].split("|", 1)
+        sel[key] = (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", "")
+    qid1, option1 = sel["q1"]
+    qid2, option2 = sel["q2"]
+
+    if status != "SUPPLYING":
+        return render_template(
+            "joint.html", status=status, qids=qids, options_by_qid=options_by_qid,
+            form=form, result=None,
+            error="联答查询仅在供数中（SUPPLYING）开放：请先在核对页完成核对并发布供数；"
+                  "若已停供，请重新核对恢复后再查。",
+        )
+    try:
+        result = joint_svc.run_joint_query(conn, qid1, option1, qid2, option2)
+    except joint_svc.JointError as exc:
+        return render_template(
+            "joint.html", status=status, qids=qids, options_by_qid=options_by_qid,
+            form=form, result=None, error=str(exc),
+        )
+    if result.get("ok"):
+        from .db import audit
+        if not result["feasible"]:
+            detail = f"无解：{result['reason']}"
+        elif result["complete"]:
+            detail = f"可达 {result['joint_values']}（完整枚举）"
+        else:
+            detail = f"已确认 {result['joint_values']}，搜索未完成"
+        audit(conn, "联答查询",
+              f"{qid1}/{option1} 与 {qid2}/{option2}：{detail}")
+        conn.commit()
+    return render_template(
+        "joint.html", status=status, qids=qids, options_by_qid=options_by_qid,
+        form=form, result=result, error=None,
+        qid1=qid1, option1=option1, qid2=qid2, option2=option2,
+    )
 
 
 # ---------------------------------------------------------------- 数据查看

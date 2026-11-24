@@ -17,6 +17,10 @@
 | 更正卷型码或实收份数：现用分配仍能证明整表则继续供数，否则立即暂停 | `correct_paper` / `correct_received_a` → `_post_correction` 统一处理；SUPPLYING 下失效即转 PAUSED 并清空失效分配 |
 | 停供后可核对同一张表，找到符合最新资料的分配才恢复 | PAUSED 下“重新核对并恢复供数”按钮 → 求解成功才回到 SUPPLYING；暂停期间的更正不自动恢复 |
 | 核对期间仍可更正，保存失败沿用已提交状态 | 所有写操作包在事务里，校验失败抛 `ImportError_` 回滚，页面回显原因、状态不变 |
+| 供数中查两道题指定选项的联答可达人数 | `app/joint.py` 的 `enumerate_joint`：枚举**全部**能复现整表人数与实收份数的卷型分配，列出联答人数的全部确实可达取值（如只有 0、2 可达就只列这两个） |
+| 排除无法换算或同卡同题重复的分配 | 分支建模 `branch_vector`：某卷型下有作答无映射、或同卡同题换算出不同标准选项时，该分支不可用，对应分配整体排除 |
+| 无解 / 搜索未完成分别提示 | 无可行分配返回明确“无解”原因；搜索受 `JOINT_NODE_LIMIT` 节点上限保护，超限只报“搜索未完成”并标注已确认子集，不假冒完整集合 |
+| 出结果前按最新已提交状态复核 | `run_joint_query` 计算前后各取一次快照并对五类依据（原始作答、卷型码、对照表、实收份数、供数表）计算 SHA-256 指纹；停供或依据有变（即便供数表人数未变）只提示重查 |
 
 ### 状态机
 
@@ -35,11 +39,15 @@ app/
   db.py          SQLite 连接、建表、状态常量
   csv_utils.py   CSV 读取、卷型码归一化（甲/乙、A/B、空=缺失）
   services.py    导入、换算、可行分配求解、状态机与更正逻辑
+  joint.py       联答可达人数枚举、依据指纹与出结果前复核
   web.py         Flask 路由
-  templates/     总览、核对供数、数据查看三个页面
-samples/         演示 CSV（含一份篡改人数的失败用例）
-scripts/make_samples.py  演示数据生成器
-tests/           selftest.py（40 项端到端）、http_smoke.py（26 项真实 HTTP）、test_solver.py（13 项求解器）
+  templates/     总览、核对供数、联答查询、数据查看四个页面
+samples/         演示 CSV（含一份篡改人数的失败用例、一套联答 {0,2} 专用样例）
+scripts/make_samples.py        演示数据生成器
+scripts/make_joint_samples.py  联答 {0,2} 样例生成器（内置暴力枚举校验）
+tests/           selftest.py（47 项端到端）、http_smoke.py（37 项真实 HTTP）、
+                 test_solver.py（13 项求解器）、test_joint.py（23 项联答求解器）、
+                 test_joint_web.py（15 项联答网页）
 Dockerfile, docker-compose.yml, requirements.txt
 ```
 
@@ -75,6 +83,21 @@ EXAM_DB_PATH=./data/exam.db python3 -m flask --app app.web run --host 0.0.0.0 --
 6. 再试把实收份数改成 7：同样立即暂停；改回 6 后重新核对恢复。
 7. 导入 `supply_bad_counts.csv`（人数被篡改）后核对，必然提示无解，无法发布。
 
+### 联答查询演示（关键情形：页面只列 0 和 2）
+
+用 `scripts/make_joint_samples.py` 生成的专用样例（4 张缺码卡 J01~J04，实收甲卷 2 份）：
+
+1. 总览页依次导入 `joint_answers.csv` → `joint_mapping.csv` → `joint_supply.csv`，
+   登记实收甲卷 **2**。
+2. 核对页点“核对：求解并保存一组可行分配”，再点“发布供数”，状态变“供数中”。
+3. 进“联答查询”页，题目一选 `Q7 — 选项 A`、题目二选 `Q8 — 选项 A`，点查询。
+   页面提示“完整枚举完成：共 2 个可行分配”，**确实可达的联答人数只列出 `0 人` 和 `2 人`**，
+   不出现 1——任何能复现整表人数与实收份数的分配下，联答都不可能是 1。
+4. 同一题重复选择（两题都选 Q7）会被拒；把实收份数改成 4 触发停供后，联答查询只提示
+   “请重新查询/恢复供数”，不给出数字。
+5. 样例生成器内置暴力枚举（`python -I scripts/make_joint_samples.py`），会自校验
+   可达集合恰为 `{0, 2}`。
+
 CSV 表头约定：
 
 - 作答：`卡号,卷型码,题位,所选项`（卷型码可空；支持 甲/乙、A/B）
@@ -88,6 +111,10 @@ CSV 表头约定：
 python3 -I tests/selftest.py
 # 求解器边界/性能（200 张缺失卡约 15ms）
 python3 -I tests/test_solver.py
+# 联答求解器（{0,2} 关键情形、分支排除、指纹、未完成、出结果前复核）
+python3 -I tests/test_joint.py
+# 联答网页（Flask 测试客户端）
+python3 -I tests/test_joint_web.py
 # 真实 HTTP 冒烟（先启动服务）
 SMOKE_BASE=http://127.0.0.1:5000 python3 -I tests/http_smoke.py
 ```
@@ -100,5 +127,11 @@ SMOKE_BASE=http://127.0.0.1:5000 python3 -I tests/http_smoke.py
 - 求解器对“贡献向量完全相同”的卡分组合并，把 2^n 降为组内甲卷数量 k 的组合搜索，
   并以各单元人数的剩余可达上下界剪枝；搜索节点上限 30 万，超限返回明确原因而非假阳性。
 - 每个解在保存前由 `_finalize` 脱离搜索结构、对整表重新换算复核，避免搜索逻辑自身的错误放行。
+- 联答枚举复用同一套“同构分组 + 单元上下界剪枝 + 甲卷名额”搜索，但不提前终止：
+  遍历**全部**可行分配，在 DFS 叶节点收集联答人数集合；节点上限 50 万，超限标记
+  `complete=False` 并只汇报已确认子集，页面区分“完整枚举 / 搜索未完成 / 无解”。
+- 联答查询在单个只读事务内取快照，纯内存计算不写业务表；计算前后各算一次五类依据的
+  SHA-256 指纹，供数状态非 SUPPLYING 或指纹不一致即拒绝出数、只提示重查，确保更正
+  （含只改对照表/供数表而人数看似未变的情形）不会被旧结果覆盖。
 - 单场考试、单 SQLite 文件；重新导入作答 CSV 会清空上一场数据（事务内完成）。
 - 开发用 Flask 内置服务器；生产部署建议换 gunicorn/uwsgi。
